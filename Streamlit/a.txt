@@ -1,1 +1,139 @@
 
+import streamlit as st
+from snowflake.snowpark.context import get_active_session
+import pandas as pd
+import altair as alt
+
+snowflake_session = get_active_session()
+
+# Function to get database names
+def get_database_names():
+    query = "SHOW DATABASES"
+    databases = [row[1] for row in snowflake_session.sql(query).collect()]
+    return databases
+
+# Function to get schema names for a specific database
+def get_schema_names(selected_database):
+    query = f"SHOW SCHEMAS IN DATABASE {selected_database}"
+    schemas = [row[1] for row in snowflake_session.sql(query).collect()]
+    return schemas
+
+# Function to get table names for a specific schema
+def get_table_names(selected_database, selected_schema):
+    query = f"SHOW TABLES IN SCHEMA {selected_database}.{selected_schema}"
+    table_names = [row[1] for row in snowflake_session.sql(query).collect()]
+    return table_names
+
+# Function to get column names for a specific table
+def get_column_names(selected_database, selected_schema, selected_table):
+    query = f"SHOW COLUMNS IN TABLE {selected_database}.{selected_schema}.{selected_table}"
+    columns = [row[2] for row in snowflake_session.sql(query).collect()]
+    return columns
+
+# Initialize session state variables
+if 'results' not in st.session_state:
+    st.session_state.results = None
+if 'viz_type' not in st.session_state:
+    st.session_state.viz_type = 'Histogram'
+if 'selected_viz_column' not in st.session_state:
+    st.session_state.selected_viz_column = None
+if 'selected_x_column' not in st.session_state:
+    st.session_state.selected_x_column = None
+if 'selected_y_column' not in st.session_state:
+    st.session_state.selected_y_column = None
+
+# Streamlit app
+st.title("Interactive Snowflake Data Explorer")
+
+# Database selection
+selected_database = st.selectbox("Select Database", get_database_names(), index=0)
+
+# Schema selection (enabled only if a database is selected)
+if selected_database:
+    selected_schema = st.selectbox("Select Schema", get_schema_names(selected_database), index=0)
+
+# Table selection (enabled only if a schema is selected)
+selected_table = None
+if selected_schema:
+    table_names = get_table_names(selected_database, selected_schema)
+    selected_table = st.selectbox("Select Table", table_names, index=0)
+
+# Column selection (enabled only if a table is selected)
+selected_columns = []
+if selected_table:
+    columns = get_column_names(selected_database, selected_schema, selected_table)
+    selected_columns = st.multiselect(f"Select Columns for {selected_table}", columns)
+
+    # Data preview
+    if st.button("Preview Data"):
+        query = f"SELECT * FROM {selected_database}.{selected_schema}.{selected_table} LIMIT 5"
+        try:
+            preview_data = snowflake_session.sql(query).to_pandas()
+            st.write(preview_data)
+        except Exception as e:
+            st.error(f"Error fetching data preview: {str(e)}")
+
+# Ensure a table and its columns are selected before enabling prompt and submit
+if selected_table and selected_columns:
+    selected_columns_display = f"{selected_table}: {', '.join(selected_columns)}"
+    st.markdown(f"Table and Column(s) Selected - {selected_columns_display}")
+
+    # Dynamic WHERE clause builder
+    where_clauses = []
+    for selected_column in selected_columns:
+        filter_condition = st.text_input(f"Enter condition for {selected_column} (e.g., = 'value')")
+        if filter_condition:
+            where_clauses.append(f"{selected_column} {filter_condition}")
+
+    # Combine WHERE clauses
+    where_clause = " AND ".join(where_clauses)
+
+    # Submit button to trigger query execution
+    if st.button("Submit"):
+        st.markdown(f"Searching for results...")
+
+        # Build and execute dynamic SQL query
+        columns_str = ", ".join(selected_columns)
+        query = f"SELECT * FROM {selected_database}.{selected_schema}.{selected_table}"
+        if where_clause:
+            query += f" WHERE {where_clause}"
+
+        try:
+            st.session_state.results = snowflake_session.sql(query).to_pandas()
+            # Display results in a readable format
+            st.write(f"Results for table {selected_table} with columns {columns_str}:")
+            st.write(st.session_state.results)
+        except Exception as e:
+            st.error(f"Error querying table {selected_table} with columns {columns_str}: {str(e)}")
+
+# Ensure results are available for visualization
+if st.session_state.results is not None:
+    results = st.session_state.results
+    numerical_columns = results.select_dtypes(include='number').columns.tolist()
+    if numerical_columns:
+        viz_type = st.selectbox("Select Visualization Type", ["Histogram", "Scatter Plot"], key='viz_type')
+
+        if viz_type == "Histogram":
+            selected_viz_column = st.selectbox("Select a numerical column for histogram", numerical_columns, key='selected_viz_column')
+            if selected_viz_column:
+                chart = alt.Chart(results).mark_bar().encode(
+                    alt.X(selected_viz_column, bin=True),
+                    y='count()'
+                ).properties(
+                    title=f'Histogram for {selected_viz_column}'
+                )
+                st.altair_chart(chart, use_container_width=True)
+
+        elif viz_type == "Scatter Plot":
+            selected_x_column = st.selectbox("Select a numerical column for X axis", numerical_columns, key='selected_x_column')
+            selected_y_column = st.selectbox("Select a numerical column for Y axis", numerical_columns, key='selected_y_column')
+            if selected_x_column and selected_y_column:
+                chart = alt.Chart(results).mark_point().encode(
+                    x=selected_x_column,
+                    y=selected_y_column
+                ).properties(
+                    title=f'Scatter plot of {selected_x_column} vs {selected_y_column}'
+                )
+                st.altair_chart(chart, use_container_width=True)
+    else:
+        st.write("No numerical columns available for visualization.")
